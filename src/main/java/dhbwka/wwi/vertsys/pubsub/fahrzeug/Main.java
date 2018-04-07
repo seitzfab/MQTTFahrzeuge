@@ -13,6 +13,12 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Scanner;
+import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
+import org.eclipse.paho.client.mqttv3.MqttException;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 
 /**
  * Hauptklasse unseres kleinen Progrämmchens.
@@ -26,8 +32,10 @@ public class Main {
 
     public static void main(String[] args) throws Exception {
         // Fahrzeug-ID abfragen
-        String vehicleId = Utils.askInput("Beliebige Fahrzeug-ID", "postauto");
+        String vehicleId = Utils.askInput("Fahrzeug-ID", "postauto");
+        MemoryPersistence persistence = new MemoryPersistence();
 
+        
         // Zu fahrende Strecke abfragen
         File workdir = new File("./waypoints");
         String[] waypointFiles = workdir.list((File dir, String name) -> {
@@ -49,9 +57,10 @@ public class Main {
         
         // TODO: Methode parseItnFile() unten ausprogrammieren
         List<WGS84> waypoints = parseItnFile(new File(workdir, waypointFiles[index]));
-
+        try {
+            waypoints = parseItnFile(new File(workdir, waypointFiles[index]));
         // Adresse des MQTT-Brokers abfragen
-        String mqttAddress = Utils.askInput("MQTT-Broker", Utils.MQTT_BROKER_ADDRESS);
+            String Adresse = Utils.askInput("MQTT-Broker", Utils.MQTT_BROKER_ADDRESS);
 
         // TODO: Sicherstellen, dass bei einem Verbindungsabbruch eine sog.
         // LastWill-Nachricht gesendet wird, die auf den Verbindungsabbruch
@@ -70,13 +79,61 @@ public class Main {
         // TODO: Thread starten, der jede Sekunde die aktuellen Sensorwerte
         // des Fahrzeugs ermittelt und verschickt. Die Sensordaten sollen
         // an das Topic Utils.MQTT_TOPIC_NAME + "/" + vehicleId gesendet werden.
-        Vehicle vehicle = new Vehicle(vehicleId, waypoints);
-        vehicle.startVehicle();
+            
+            MqttClient mqttClient = new MqttClient(Adresse,vehicleId,persistence);
+
+            StatusMessage lastWill= new StatusMessage();
+            lastWill.type=StatusType.CONNECTION_LOST;
+            lastWill.vehicleId=vehicleId;
+            lastWill.message="Keine Verbindung mehr";
+
+            MqttConnectOptions mqttCO = new MqttConnectOptions();
+            mqttCO.setWill(Utils.MQTT_TOPIC_NAME, lastWill.toJson(), 0, true);
+            mqttCO.setCleanSession(true);
+            System.out.println("Verbindung zum Broker: "+Adresse);
+        
+            mqttClient.connect(mqttCO);
+            System.out.println("Verbunden");
+            
+            StatusMessage Status= new StatusMessage();
+            Status.type=StatusType.VEHICLE_READY;
+            Status.vehicleId=vehicleId;
+            Status.message="Fahrzeug bereit";
+
+            MqttMessage Nachricht = new MqttMessage();
+            Nachricht.setQos(0);
+            Nachricht.setPayload(Status.toJson());
+            mqttClient.publish(Utils.MQTT_TOPIC_NAME, Nachricht);
+            System.out.println("Bereit!");
+            
+            Vehicle vehicle = new Vehicle(vehicleId, waypoints);
+            vehicle.startVehicle();
 
         // Warten, bis das Programm beendet werden soll
-        Utils.fromKeyboard.readLine();
+            java.util.Timer timer= new java.util.Timer();
+            timer.schedule(new java.util.TimerTask() {
 
-        vehicle.stopVehicle();
+                @Override
+                public void run() {
+                    try {
+                        mqttClient.publish(Utils.MQTT_TOPIC_NAME + "/" + vehicleId, new MqttMessage(vehicle.getSensorData().toJson()));
+                    }catch (Exception e){
+                        e.printStackTrace();
+                    }
+                    }
+            }, 0,1000);
+            
+            Utils.fromKeyboard.readLine();
+            vehicle.stopVehicle();
+            timer.cancel();
+
+            mqttClient.publish(Utils.MQTT_TOPIC_NAME, new MqttMessage(lastWill.toJson()));
+            mqttClient.disconnect();
+            System.out.println("Verbindung getrennt zu " + Adresse);
+        }catch(Exception e){
+            e.printStackTrace();
+        }
+
         
         // TODO: Oben vorbereitete LastWill-Nachricht hier manuell versenden,
         // da sie bei einem regulären Verbindungsende nicht automatisch
@@ -110,8 +167,14 @@ public class Main {
         List<WGS84> waypoints = new ArrayList<>();
 
         // TODO: Übergebene Datei parsen und Liste "waypoints" damit füllen
-
+        String[] werte = {""};
+        
+        Scanner eingabe = new Scanner(file);
+        while (eingabe.hasNext()) {
+            String nextLine = eingabe.nextLine();
+            werte = nextLine.split("\\|");
+            waypoints.add(new WGS84(Double.parseDouble(werte[1])/100000,Double.parseDouble(werte[0])/100000));
+        }       
         return waypoints;
     }
-
 }
